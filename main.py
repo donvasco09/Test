@@ -40,7 +40,7 @@ async def whatsapp_webhook(request: Request):
     
     # Send via WhatsApp
     message = twilio_client.messages.create(
-        from_='whatsapp:+12676510310',
+        from_='whatsapp:+14155238886',
         body=ai_response,
         to=from_number
     )
