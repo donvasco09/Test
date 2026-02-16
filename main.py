@@ -43,7 +43,7 @@ async def whatsapp_webhook(request: Request):
         # Call Claude
         print("Calling Claude API...")
         response = anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=500,
             messages=[{"role": "user", "content": user_message}],
             system="You're a dental clinic assistant in Mexico. Respond in Spanish briefly and helpfully."
