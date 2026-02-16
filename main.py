@@ -154,16 +154,16 @@ INSTRUCCIONES:
 - Pregunta qué servicio necesitan
 - Si no sabes algo, ofrece tomar nota y que te contactarán"""
 
-# Llamar a Deepseek
-response = deepseek_client.chat.completions.create(
-    model="deepseek-chat",
-    messages=[
-        {"role": "system", "content": "You are a helpful dental assistant."},
-        {"role": "user", "content": user_message}
-    ],
-    max_tokens=500
-)
-ai_response = response.choices[0].message.content
+        # Llamar a Deepseek
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=500
+        )
+        ai_response = response.choices[0].message.content
         print(f"💬 Respuesta: {ai_response}")
         
         # Guardar en base de datos
