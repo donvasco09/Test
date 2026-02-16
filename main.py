@@ -9,6 +9,28 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 import re
+import sys
+
+print("🔍 Verificando variables de entorno...")
+
+# Verificar variables requeridas
+required_vars = {
+    "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY"),
+    "TWILIO_SID": os.getenv("TWILIO_SID"),
+    "TWILIO_TOKEN": os.getenv("TWILIO_TOKEN"),
+    "DATABASE_URL": os.getenv("DATABASE_URL")
+}
+
+missing_vars = [name for name, value in required_vars.items() if not value]
+if missing_vars:
+    print(f"❌ ERROR: Faltan variables: {missing_vars}")
+    sys.exit(1)  # Detener la app
+
+print("✅ Todas las variables están presentes")
+
+
+
+
 
 # Configuración de la base de datos
 DATABASE_URL = os.getenv("DATABASE_URL")
