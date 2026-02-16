@@ -38,7 +38,9 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 # Inicializar clientes de API
-anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+anthropic_client = Anthropic(api_key=os.getenv("DEEPSEEK_API_KEY"),
+                            base_url="https://api.deepseek.com/v1"
+)
 twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
 
 # Función para obtener o crear conversación
@@ -154,7 +156,7 @@ INSTRUCCIONES:
         # Llamar a Claude
         print("🤖 Llamando a Claude...")
         response = anthropic_client.messages.create(
-            model="claude-3-haiku-20240307",
+            model="deepseek-chat",
             max_tokens=500,
             messages=[{"role": "user", "content": user_message}],
             system=system_prompt
