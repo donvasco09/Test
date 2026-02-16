@@ -2,148 +2,254 @@ from fastapi import FastAPI, Request
 from twilio.rest import Client
 from anthropic import Anthropic
 import os
+from datetime import datetime
+import json
+from sqlalchemy import create_engine, Column, String, DateTime, JSON, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
+import re
 
+# Configuración de la base de datos
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    # Railway usa postgres:// pero SQLAlchemy requiere postgresql://
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# Configurar SQLAlchemy
+engine = create_engine(DATABASE_URL, poolclass=NullPool)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Modelo de base de datos
+class Conversation(Base):
+    __tablename__ = "conversations"
+    
+    phone_number = Column(String(50), primary_key=True)
+    user_data = Column(JSON)  # Guarda nombre, etc.
+    history = Column(JSON)    # Guarda el historial de mensajes
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# Crear tablas
+Base.metadata.create_all(bind=engine)
+
+# Inicializar app
 app = FastAPI()
 
-# Inicializar clientes con variables de entorno
+# Inicializar clientes de API
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
 
-# Store appointments in memory (upgrade to DB later)
-appointments = {}
+# Función para obtener o crear conversación
+def get_or_create_conversation(phone_number):
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.phone_number == phone_number).first()
+        
+        if not conv:
+            # Crear nueva conversación
+            conv = Conversation(
+                phone_number=phone_number,
+                user_data={"name": None, "first_seen": datetime.now().isoformat()},
+                history=[]
+            )
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+        
+        return conv
+    finally:
+        db.close()
+
+# Función para actualizar conversación
+def update_conversation(phone_number, user_data=None, new_message=None, new_response=None):
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.phone_number == phone_number).first()
+        if conv:
+            if user_data:
+                conv.user_data = user_data
+            
+            if new_message and new_response:
+                history = conv.history or []
+                history.append({
+                    "user": new_message,
+                    "assistant": new_response,
+                    "timestamp": datetime.now().isoformat()
+                })
+                # Mantener solo últimos 20 mensajes
+                conv.history = history[-20:]
+            
+            db.commit()
+    finally:
+        db.close()
 
 @app.post("/whatsapp-webhook")
 async def whatsapp_webhook(request: Request):
-    """Handle WhatsApp messages with detailed error logging"""
     try:
-        # Get the raw form data
         form_data = await request.form()
-        print("Received webhook: " + str(dict(form_data)))
-        
         user_message = form_data.get('Body', '')
         from_number = form_data.get('From', '')
         
-        print("Message: '" + user_message + "' from " + from_number)
+        print(f"\n📱 Mensaje de {from_number}: {user_message}")
         
-        # Check if API keys exist
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-        twilio_sid = os.getenv("TWILIO_SID")
-        twilio_token = os.getenv("TWILIO_TOKEN")
+        # Obtener conversación existente o crear nueva
+        conversation = get_or_create_conversation(from_number)
+        user_data = conversation.user_data or {}
+        history = conversation.history or []
         
-        print("API Keys present - Anthropic: " + str(bool(anthropic_key)) + 
-              ", Twilio SID: " + str(bool(twilio_sid)) + 
-              ", Twilio Token: " + str(bool(twilio_token)))
+        print(f"👤 Datos actuales: {user_data}")
         
-        if not anthropic_key:
-            raise Exception("ANTHROPIC_API_KEY is missing!")
+        # Detectar nombre si no lo tenemos
+        if not user_data.get("name"):
+            name_patterns = [
+                r"me llamo ([A-Za-záéíóúÁÉÍÓÚ]+)",
+                r"mi nombre es ([A-Za-záéíóúÁÉÍÓÚ]+)",
+                r"soy ([A-Za-záéíóúÁÉÍÓÚ]+)",
+                r"llamo ([A-Za-záéíóúÁÉÍÓÚ]+)"
+            ]
+            
+            for pattern in name_patterns:
+                match = re.search(pattern, user_message, re.IGNORECASE)
+                if match:
+                    user_data["name"] = match.group(1)
+                    print(f"✅ Nombre detectado: {user_data['name']}")
+                    break
         
-        if not twilio_sid or not twilio_token:
-            raise Exception("Twilio credentials are missing!")
+        # Construir historial para el prompt
+        history_text = ""
+        for msg in history[-5:]:  # Últimos 5 mensajes para contexto
+            history_text += f"Paciente: {msg['user']}\nAsistente: {msg['assistant']}\n"
         
-        # Call Claude
-        print("Calling Claude API...")
+        # Sistema prompt con contexto
+        system_prompt = f"""Eres un asistente virtual para una clínica dental en México llamada "Sonrisa Perfecta".
+
+INFORMACIÓN DEL PACIENTE:
+- Nombre: {user_data.get('name', 'No proporcionado')}
+- Teléfono: {from_number}
+
+HORARIOS DE ATENCIÓN:
+- Lunes a Viernes: 9:00 AM - 6:00 PM
+- Sábados: 9:00 AM - 2:00 PM
+- Domingos: Cerrado
+
+SERVICIOS:
+- Limpieza dental ($800 MXN)
+- Extracciones ($1,200 MXN)
+- Blanqueamiento ($2,500 MXN)
+- Consulta general ($500 MXN)
+
+HISTORIAL RECIENTE:
+{history_text}
+
+INSTRUCCIONES:
+- Usa el nombre del paciente si lo conoces
+- Mantén el contexto de la conversación
+- Sé amable y profesional en español de México
+- Ofrece horarios disponibles cuando pidan citas
+- Pregunta qué servicio necesitan
+- Si no sabes algo, ofrece tomar nota y que te contactarán"""
+
+        # Llamar a Claude
+        print("🤖 Llamando a Claude...")
         response = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-3-haiku-20240307",
             max_tokens=500,
             messages=[{"role": "user", "content": user_message}],
-            system="You're a dental clinic assistant in Mexico. Respond in Spanish briefly and helpfully."
+            system=system_prompt
         )
         
         ai_response = response.content[0].text
-        print("Claude response: " + ai_response)
+        print(f"💬 Respuesta: {ai_response}")
         
-        # Send back via Twilio Sandbox
-        print("Sending WhatsApp reply...")
+        # Guardar en base de datos
+        update_conversation(
+            phone_number=from_number,
+            user_data=user_data,
+            new_message=user_message,
+            new_response=ai_response
+        )
+        
+        # Enviar respuesta por WhatsApp
         message = twilio_client.messages.create(
-            from_='whatsapp:+14155238886',  # Twilio Sandbox number
+            from_='whatsapp:+14155238886',
             body=ai_response,
             to=from_number
         )
-        print("Message sent! SID: " + message.sid)
         
+        print("✅ Mensaje enviado")
         return {"status": "ok"}
         
     except Exception as e:
-        # This will show us exactly what went wrong
-        error_msg = "ERROR: " + str(type(e).__name__) + ": " + str(e)
-        print(error_msg)
-        
-        # Try to send an error message back to the user
-        try:
-            if 'from_number' in locals() and from_number:
-                twilio_client.messages.create(
-                    from_='whatsapp:+14155238886',
-                    body="Lo siento, tengo problemas técnicos. Por favor intenta más tarde.",
-                    to=from_number
-                )
-        except:
-            pass
-            
+        print(f"❌ ERROR: {str(e)}")
         return {"status": "error", "message": str(e)}, 500
+
+# Endpoints de administración
+@app.get("/admin/conversations")
+async def list_conversations(limit: int = 10):
+    """Lista las conversaciones recientes (solo para administración)"""
+    db = SessionLocal()
+    try:
+        conversations = db.query(Conversation).order_by(Conversation.updated_at.desc()).limit(limit).all()
+        result = []
+        for conv in conversations:
+            result.append({
+                "phone": conv.phone_number,
+                "user_data": conv.user_data,
+                "message_count": len(conv.history or []),
+                "last_message": conv.history[-1] if conv.history else None,
+                "updated_at": conv.updated_at.isoformat() if conv.updated_at else None
+            })
+        return {"conversations": result}
+    finally:
+        db.close()
+
+@app.get("/admin/conversation/{phone_number}")
+async def get_conversation(phone_number: str):
+    """Obtiene una conversación específica"""
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.phone_number == phone_number).first()
+        if conv:
+            return {
+                "phone": conv.phone_number,
+                "user_data": conv.user_data,
+                "history": conv.history,
+                "created_at": conv.created_at.isoformat() if conv.created_at else None,
+                "updated_at": conv.updated_at.isoformat() if conv.updated_at else None
+            }
+        return {"error": "Conversación no encontrada"}, 404
+    finally:
+        db.close()
 
 @app.get("/")
 async def root():
-    return {"message": "AI Labor Center MVP is running with Claude!"}
+    return {
+        "message": "AI Labor Center con PostgreSQL",
+        "status": "running",
+        "database": "connected" if DATABASE_URL else "not configured"
+    }
 
 @app.get("/health")
 async def health():
-    """Health check endpoint for Railway"""
-    return {"status": "healthy"}
-
-@app.get("/check-config")
-async def check_config():
-    """Check if all required environment variables are set"""
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    twilio_sid = os.getenv("TWILIO_SID")
-    twilio_token = os.getenv("TWILIO_TOKEN")
+    """Health check que también verifica la DB"""
+    try:
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        db_status = "connected"
+    except:
+        db_status = "error"
     
     return {
-        "anthropic_key_exists": bool(anthropic_key),
-        "anthropic_key_prefix": anthropic_key[:10] + "..." if anthropic_key else None,
-        "twilio_sid_exists": bool(twilio_sid),
-        "twilio_sid_prefix": twilio_sid[:10] + "..." if twilio_sid else None,
-        "twilio_token_exists": bool(twilio_token),
-        "message": "If any are False, add them in Railway Variables!"
+        "status": "healthy",
+        "database": db_status,
+        "timestamp": datetime.now().isoformat()
     }
 
-@app.get("/check-twilio")
-async def check_twilio():
-    """Verify that Twilio credentials are correct"""
-    try:
-        # Try to make a simple API call
-        account = twilio_client.api.accounts(os.getenv("TWILIO_SID")).fetch()
-        return {
-            "status": "Valid credentials",
-            "account_name": account.friendly_name,
-            "auth_token_exists": bool(os.getenv("TWILIO_TOKEN"))
-        }
-    except Exception as e:
-        return {
-            "status": "Error with credentials",
-            "error": str(e)
-        }
-
-@app.post("/test-post")
-async def test_post(request: Request):
-    """Test endpoint for POST requests"""
-    try:
-        data = await request.form()
-        print("Test POST received: " + str(dict(data)))
-        return {"status": "success", "received": dict(data)}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# This is critical - makes it work on Railway
 if __name__ == "__main__":
     import uvicorn
-    
     port = int(os.getenv("PORT", 8000))
-    print("Starting server on port " + str(port))
-    print("Binding to 0.0.0.0 - this is CORRECT for Railway")
-    
-    uvicorn.run(
-        "main:app", 
-        host="0.0.0.0",  # MUST be 0.0.0.0, not localhost!
-        port=port,
-        reload=False
-    )
+    print(f"🚀 Iniciando servidor en puerto {port}")
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
