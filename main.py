@@ -10,10 +10,21 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 import re
 import sys
+import logging
 
-print("🔍 Verificando variables de entorno...")
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
-# Verificar variables requeridas
+logger.info("🔍 Iniciando aplicación...")
+
+# ========== VALIDACIÓN DE VARIABLES DE ENTORNO ==========
+logger.info("Verificando variables de entorno...")
+
 required_vars = {
     "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY"),
     "TWILIO_SID": os.getenv("TWILIO_SID"),
@@ -23,57 +34,87 @@ required_vars = {
 
 missing_vars = [name for name, value in required_vars.items() if not value]
 if missing_vars:
-    print(f"❌ ERROR: Faltan variables: {missing_vars}")
-    sys.exit(1)  # Detener la app
+    logger.error(f"❌ ERROR CRÍTICO: Faltan variables: {missing_vars}")
+    logger.error("💡 Configúralas en Railway > Variables")
+    sys.exit(1)
 
-print("✅ Todas las variables están presentes")
+logger.info("✅ Todas las variables están presentes")
 
-
-
-
-
-# Configuración de la base de datos
+# ========== CONFIGURACIÓN DE BASE DE DATOS ==========
 DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    # Railway usa postgres:// pero SQLAlchemy requiere postgresql://
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+logger.info(f"📊 Conectando a base de datos...")
 
-# Configurar SQLAlchemy
-engine = create_engine(DATABASE_URL, poolclass=NullPool)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+try:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+        logger.info("🔄 URL convertida a postgresql://")
+    
+    # Configurar SQLAlchemy
+    engine = create_engine(
+        DATABASE_URL, 
+        poolclass=NullPool,
+        connect_args={"connect_timeout": 10}  # Timeout de conexión
+    )
+    
+    # Probar conexión
+    with engine.connect() as conn:
+        conn.execute("SELECT 1")
+    logger.info("✅ Conexión a base de datos exitosa")
+    
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base = declarative_base()
+    
+except Exception as e:
+    logger.error(f"❌ ERROR conectando a base de datos: {str(e)}")
+    logger.error("💡 Verifica que PostgreSQL esté agregado al proyecto")
+    sys.exit(1)
 
-# Modelo de base de datos
+# ========== MODELO DE BASE DE DATOS ==========
 class Conversation(Base):
     __tablename__ = "conversations"
     
     phone_number = Column(String(50), primary_key=True)
-    user_data = Column(JSON)  # Guarda nombre, etc.
-    history = Column(JSON)    # Guarda el historial de mensajes
+    user_data = Column(JSON, default={})
+    history = Column(JSON, default=[])
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# Crear tablas
-Base.metadata.create_all(bind=engine)
+# Crear tablas (safe create)
+try:
+    Base.metadata.create_all(bind=engine)
+    logger.info("✅ Tablas verificadas/creadas")
+except Exception as e:
+    logger.error(f"❌ Error creando tablas: {str(e)}")
+    sys.exit(1)
 
-# Inicializar app
-app = FastAPI()
+# ========== INICIALIZAR CLIENTES ==========
+logger.info("Inicializando clientes API...")
 
-# Initialize the DeepSeek client using the OpenAI SDK
-deepseek_client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com/v1"  # This is the correct OpenAI-compatible endpoint!
-)
-twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
+try:
+    deepseek_client = OpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        base_url="https://api.deepseek.com/v1"
+    )
+    logger.info("✅ DeepSeek client inicializado")
+except Exception as e:
+    logger.error(f"❌ Error inicializando DeepSeek: {str(e)}")
+    sys.exit(1)
 
-# Función para obtener o crear conversación
+try:
+    twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
+    logger.info("✅ Twilio client inicializado")
+except Exception as e:
+    logger.error(f"❌ Error inicializando Twilio: {str(e)}")
+    sys.exit(1)
+
+# ========== FUNCIONES DE BASE DE DATOS ==========
 def get_or_create_conversation(phone_number):
+    """Obtiene o crea una conversación"""
     db = SessionLocal()
     try:
         conv = db.query(Conversation).filter(Conversation.phone_number == phone_number).first()
         
         if not conv:
-            # Crear nueva conversación
             conv = Conversation(
                 phone_number=phone_number,
                 user_data={"name": None, "first_seen": datetime.now().isoformat()},
@@ -82,13 +123,18 @@ def get_or_create_conversation(phone_number):
             db.add(conv)
             db.commit()
             db.refresh(conv)
+            logger.info(f"🆕 Nueva conversación creada para {phone_number}")
         
         return conv
+    except Exception as e:
+        logger.error(f"❌ Error en get_or_create_conversation: {str(e)}")
+        db.rollback()
+        raise
     finally:
         db.close()
 
-# Función para actualizar conversación
 def update_conversation(phone_number, user_data=None, new_message=None, new_response=None):
+    """Actualiza una conversación"""
     db = SessionLocal()
     try:
         conv = db.query(Conversation).filter(Conversation.phone_number == phone_number).first()
@@ -103,30 +149,74 @@ def update_conversation(phone_number, user_data=None, new_message=None, new_resp
                     "assistant": new_response,
                     "timestamp": datetime.now().isoformat()
                 })
-                # Mantener solo últimos 20 mensajes
-                conv.history = history[-20:]
+                conv.history = history[-20:]  # Mantener últimos 20
             
             db.commit()
+    except Exception as e:
+        logger.error(f"❌ Error en update_conversation: {str(e)}")
+        db.rollback()
+        raise
     finally:
         db.close()
 
+# ========== INICIALIZAR FASTAPI ==========
+app = FastAPI(title="WhatsApp Dental Bot", version="1.0.0")
+logger.info("✅ FastAPI app creada")
+
+# ========== ENDPOINTS ==========
+@app.get("/")
+async def root():
+    return {
+        "message": "WhatsApp Dental Bot",
+        "status": "running",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/health")
+async def health():
+    """Health check completo"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "checks": {}
+    }
+    
+    # Verificar base de datos
+    try:
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        health_status["checks"]["database"] = "connected"
+    except Exception as e:
+        health_status["checks"]["database"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Verificar APIs
+    health_status["checks"]["deepseek_api"] = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
+    health_status["checks"]["twilio_api"] = "configured" if os.getenv("TWILIO_SID") and os.getenv("TWILIO_TOKEN") else "missing"
+    
+    return health_status
+
 @app.post("/whatsapp-webhook")
 async def whatsapp_webhook(request: Request):
+    """Webhook para mensajes de WhatsApp"""
     try:
         form_data = await request.form()
-        user_message = form_data.get('Body', '')
+        user_message = form_data.get('Body', '').strip()
         from_number = form_data.get('From', '')
         
-        print(f"\n📱 Mensaje de {from_number}: {user_message}")
+        logger.info(f"📱 Mensaje de {from_number}: {user_message}")
         
-        # Obtener conversación existente o crear nueva
+        if not user_message or not from_number:
+            logger.warning("⚠️ Mensaje vacío o sin número")
+            return {"status": "error", "message": "Invalid request"}, 400
+        
+        # Obtener conversación
         conversation = get_or_create_conversation(from_number)
         user_data = conversation.user_data or {}
         history = conversation.history or []
         
-        print(f"👤 Datos actuales: {user_data}")
-        
-        # Detectar nombre si no lo tenemos
+        # Detectar nombre
         if not user_data.get("name"):
             name_patterns = [
                 r"me llamo ([A-Za-záéíóúÁÉÍÓÚ]+)",
@@ -139,15 +229,15 @@ async def whatsapp_webhook(request: Request):
                 match = re.search(pattern, user_message, re.IGNORECASE)
                 if match:
                     user_data["name"] = match.group(1)
-                    print(f"✅ Nombre detectado: {user_data['name']}")
+                    logger.info(f"✅ Nombre detectado: {user_data['name']}")
                     break
         
-        # Construir historial para el prompt
+        # Construir historial para contexto
         history_text = ""
-        for msg in history[-5:]:  # Últimos 5 mensajes para contexto
+        for msg in history[-5:]:
             history_text += f"Paciente: {msg['user']}\nAsistente: {msg['assistant']}\n"
         
-        # Sistema prompt con contexto
+        # Sistema prompt
         system_prompt = f"""Eres un asistente virtual para una clínica dental en México llamada "Sonrisa Perfecta".
 
 INFORMACIÓN DEL PACIENTE:
@@ -176,19 +266,22 @@ INSTRUCCIONES:
 - Pregunta qué servicio necesitan
 - Si no sabes algo, ofrece tomar nota y que te contactarán"""
 
-        # Llamar a Deepseek
+        # Llamar a DeepSeek
+        logger.info("🤖 Llamando a DeepSeek API...")
         response = deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
-            max_tokens=500
+            max_tokens=500,
+            temperature=0.7
         )
-        ai_response = response.choices[0].message.content
-        print(f"💬 Respuesta: {ai_response}")
         
-        # Guardar en base de datos
+        ai_response = response.choices[0].message.content
+        logger.info(f"💬 Respuesta generada: {ai_response[:100]}...")
+        
+        # Guardar en BD
         update_conversation(
             phone_number=from_number,
             user_data=user_data,
@@ -196,24 +289,25 @@ INSTRUCCIONES:
             new_response=ai_response
         )
         
-        # Enviar respuesta por WhatsApp
+        # Enviar por WhatsApp
+        logger.info("📤 Enviando respuesta por WhatsApp...")
         message = twilio_client.messages.create(
             from_='whatsapp:+14155238886',
             body=ai_response,
             to=from_number
         )
         
-        print("✅ Mensaje enviado")
-        return {"status": "ok"}
+        logger.info(f"✅ Mensaje enviado (SID: {message.sid})")
+        return {"status": "ok", "message_sid": message.sid}
         
     except Exception as e:
-        print(f"❌ ERROR: {str(e)}")
-        return {"status": "error", "message": str(e)}, 500
+        logger.error(f"❌ ERROR en webhook: {str(e)}", exc_info=True)
+        return {"status": "error", "message": "Internal server error"}, 500
 
-# Endpoints de administración
+# ========== ENDPOINTS DE ADMINISTRACIÓN ==========
 @app.get("/admin/conversations")
 async def list_conversations(limit: int = 10):
-    """Lista las conversaciones recientes (solo para administración)"""
+    """Lista las conversaciones recientes"""
     db = SessionLocal()
     try:
         conversations = db.query(Conversation).order_by(Conversation.updated_at.desc()).limit(limit).all()
@@ -248,33 +342,14 @@ async def get_conversation(phone_number: str):
     finally:
         db.close()
 
-@app.get("/")
-async def root():
-    return {
-        "message": "AI Labor Center con PostgreSQL",
-        "status": "running",
-        "database": "connected" if DATABASE_URL else "not configured"
-    }
-
-@app.get("/health")
-async def health():
-    """Health check que también verifica la DB"""
-    try:
-        db = SessionLocal()
-        db.execute("SELECT 1")
-        db.close()
-        db_status = "connected"
-    except:
-        db_status = "error"
-    
-    return {
-        "status": "healthy",
-        "database": db_status,
-        "timestamp": datetime.now().isoformat()
-    }
-
+# ========== PUNTO DE ENTRADA ==========
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    print(f"🚀 Iniciando servidor en puerto {port}")
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    logger.info(f"🚀 Iniciando servidor en puerto {port}")
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=port,
+        log_level="info"
+    )
