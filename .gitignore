@@ -1,0 +1,45 @@
+# Environment variables - ¡NUNCA subir estos!
+.env
+.env.local
+.env.*.local
+
+# Python cache files - innecesarios en GitHub
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+
+# Virtual environments - son específicos de tu máquina
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE settings - configuraciones personales
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Railway local files (si los usas)
+.railway/
+
+# Logs - no necesitas subir archivos de log
+*.log
+logs/
+
+# Testing - archivos temporales de pruebas
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
