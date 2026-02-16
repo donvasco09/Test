@@ -50,3 +50,19 @@ async def whatsapp_webhook(request: Request):
 @app.get("/")
 async def root():
     return {"message": "AI Labor Center MVP is running with Claude!"}
+
+# Add at the VERY END of main.py
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    
+    # Railway sets the PORT environment variable automatically
+    port = int(os.getenv("PORT", 8000))
+    print(f"Starting server on port {port}")
+    
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=port,
+        reload=False
+    )
