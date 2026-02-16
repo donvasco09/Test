@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from twilio.rest import Client
-from anthropic import Anthropic
+from openai import OpenAI
 import os
 from datetime import datetime
 import json
@@ -37,9 +37,10 @@ Base.metadata.create_all(bind=engine)
 # Inicializar app
 app = FastAPI()
 
-# Inicializar clientes de API
-anthropic_client = Anthropic(api_key=os.getenv("DEEPSEEK_API_KEY"),
-                            base_url="https://api.deepseek.com/v1"
+# Initialize the DeepSeek client using the OpenAI SDK
+deepseek_client = OpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    base_url="https://api.deepseek.com/v1"  # This is the correct OpenAI-compatible endpoint!
 )
 twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
 
@@ -153,16 +154,16 @@ INSTRUCCIONES:
 - Pregunta qué servicio necesitan
 - Si no sabes algo, ofrece tomar nota y que te contactarán"""
 
-        # Llamar a Claude
-        print("🤖 Llamando a Claude...")
-        response = anthropic_client.messages.create(
-            model="deepseek-chat",
-            max_tokens=500,
-            messages=[{"role": "user", "content": user_message}],
-            system=system_prompt
-        )
-        
-        ai_response = response.content[0].text
+# Llamar a Deepseek
+response = deepseek_client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[
+        {"role": "system", "content": "You are a helpful dental assistant."},
+        {"role": "user", "content": user_message}
+    ],
+    max_tokens=500
+)
+ai_response = response.choices[0].message.content
         print(f"💬 Respuesta: {ai_response}")
         
         # Guardar en base de datos
