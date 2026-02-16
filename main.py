@@ -1,10 +1,15 @@
 from fastapi import FastAPI, Request
 from twilio.rest import Client
-from openai import OpenAI
+from anthropic import Anthropic  # Changed import
 import os
 
 app = FastAPI()
-openai_client = OpenAI(api_key=os.getenv("OPENAI_KEY"))
+
+# Initialize Claude client (instead of OpenAI)
+anthropic_client = Anthropic(
+    api_key=os.getenv("ANTHROPIC_API_KEY")  # Changed env variable
+)
+
 twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
 
 # Store appointments in memory (upgrade to DB later)
@@ -17,16 +22,21 @@ async def whatsapp_webhook(request: Request):
     user_message = data.get('Body', '')
     from_number = data.get('From', '')
     
-    # Simple AI response
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+    # Claude API call (different format from OpenAI)
+    response = anthropic_client.messages.create(
+        model="claude-3-5-sonnet-20241022",  # Latest Claude model
+        max_tokens=1024,
         messages=[
-            {"role": "system", "content": "You're a dental clinic assistant in Mexico."},
-            {"role": "user", "content": user_message}
-        ]
+            {
+                "role": "user", 
+                "content": user_message
+            }
+        ],
+        system="You're a dental clinic assistant in Mexico. Be helpful, concise, and professional in Spanish."  # System prompt
     )
     
-    ai_response = response.choices[0].message.content
+    # Extract the response text (Claude returns content differently)
+    ai_response = response.content[0].text
     
     # Send via WhatsApp
     message = twilio_client.messages.create(
@@ -39,4 +49,4 @@ async def whatsapp_webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"message": "AI Labor Center MVP is running!"}
+    return {"message": "AI Labor Center MVP is running with Claude!"}
