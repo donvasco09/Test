@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, Column, String, DateTime, JSON, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlalchemy import text
 import re
 import sys
 import logging
@@ -58,7 +59,9 @@ try:
     
     # Probar conexión
     with engine.connect() as conn:
-        conn.execute("SELECT 1")
+        conn.execute(text("SELECT 1"))
+        conn.commit()
+    
     logger.info("✅ Conexión a base de datos exitosa")
     
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
